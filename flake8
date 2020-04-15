@@ -1,0 +1,7 @@
+# Based on:
+#   https://black.readthedocs.io/en/stable/the_black_code_style.html#line-length
+[flake8]
+max-line-length = 80
+max-complexity = 18
+select = B,C,E,F,W,B9
+ignore = E203,E501,W503,B008
