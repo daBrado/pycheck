@@ -8,6 +8,6 @@ RUN pip --no-cache-dir install \
   mypy \
   && pip check
 COPY flake8 /root/.config/flake8
-COPY isort.cfg /root/.confg/.isort.cfg
+COPY isort.cfg /root/.config/isort.cfg
 COPY mypy.ini /root/.config/mypy/config
 COPY check.py /
