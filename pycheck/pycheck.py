@@ -1,17 +1,9 @@
-from argparse import ArgumentParser
-from asyncio import FIRST_COMPLETED, create_subprocess_exec, create_task, run, wait
+from asyncio import FIRST_COMPLETED, create_subprocess_exec, create_task, wait
 from asyncio.subprocess import PIPE
 from os import walk
-from os.path import exists, join
+from os.path import join
 
 from inotify_simple import INotify, flags, masks  # type: ignore
-
-parser = ArgumentParser(description="Check the project.")
-parser.add_argument("--watch", action="store_true")
-parser.add_argument(
-    "--watch-delay", type=int, default=100, help="watch debounce delay (ms)"
-)
-args = parser.parse_args()
 
 
 class SubprocessError(RuntimeError):
@@ -57,17 +49,44 @@ async def run_cmds(*cmds):
         raise SubprocessError()
 
 
-async def check_all():
-    await run_cmds("isort -rc .")
+async def check_all(cache_dir):
+    # isort configuration from:
+    #   https://black.readthedocs.io/en/stable/the_black_code_style.html#how-black-wraps-lines  # noqa: B950
+    await run_cmds(
+        "isort "
+        "--multi-line=3 "
+        "--trailing-comma "
+        "--force-grid-wrap=0 "
+        "--use-parentheses "
+        "--line-width=88 "
+        "-rc "
+        "."
+    )
     await run_cmds("black .")
     await run_cmds(
-        "flake8 .", f"mypy {'src' if exists('src') else ''} .",
+        # Based on:
+        #   https://black.readthedocs.io/en/stable/the_black_code_style.html#line-length  # noqa: B950
+        (
+            "flake8 "
+            "--max-line-length=80 "
+            "--max-complexity=18 "
+            "--select=B,C,E,F,W,B9 "
+            "--ignore=E203,E501,W503,B008 "
+            "."
+        ),
+        (
+            "mypy "
+            "--disallow-any-generics "
+            "--warn-redundant-casts "
+            f"--warn-unused-ignores --cache-dir {join(cache_dir, 'mypy')} ."
+        ),
+        f"pytest -o cache_dir={join(cache_dir, 'pytest')}",
     )
 
 
-async def check():
+async def check(cache_dir):
     try:
-        await check_all()
+        await check_all(cache_dir=cache_dir)
     except SubprocessError:
         print("!!! Problems found.")
         return False
@@ -75,8 +94,8 @@ async def check():
     return True
 
 
-async def amain():
-    success = await check()
+async def amain(args):
+    success = await check(cache_dir=args.cache_dir)
     if not args.watch:
         exit(0 if success else 1)
 
@@ -108,6 +127,3 @@ async def amain():
             print("\n")
             await check()
             paths = []
-
-
-run(amain())
