@@ -125,5 +125,5 @@ async def amain(args):
                 paths.append(path)
         if not events and paths:
             print("\n")
-            await check()
+            await check(cache_dir=args.cache_dir)
             paths = []
