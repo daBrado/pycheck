@@ -10,6 +10,10 @@ class SubprocessError(RuntimeError):
     pass
 
 
+def p(str):
+    print(str, flush=True)
+
+
 async def run_cmds(*cmds):
     tasks = {
         create_task(proc.communicate()): (cmd, proc)
@@ -37,7 +41,7 @@ async def run_cmds(*cmds):
                     ).splitlines()
                 ]
             )
-            print(
+            p(
                 f"{border*3} "
                 + cmd
                 + (f"\n{output}\n{border} " if output else " ")
@@ -88,9 +92,9 @@ async def check(cache_dir):
     try:
         await check_all(cache_dir=cache_dir)
     except SubprocessError:
-        print("!!! Problems found.")
+        p("!!! Problems found.")
         return False
-    print("*** All good.")
+    p("*** All good.")
     return True
 
 
@@ -124,6 +128,6 @@ async def amain(args):
             else:
                 paths.append(path)
         if not events and paths:
-            print("\n")
+            p("\n")
             await check(cache_dir=args.cache_dir)
             paths = []
