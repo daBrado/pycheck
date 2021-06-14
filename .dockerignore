@@ -1,4 +1,0 @@
-.dockerignore
-.git
-Dockerfile
-docker-compose.yml

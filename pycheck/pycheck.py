@@ -1,25 +1,32 @@
 from asyncio import FIRST_COMPLETED, create_subprocess_exec, create_task, wait
 from asyncio.subprocess import PIPE
+from collections.abc import MutableMapping
 from os import walk
-from os.path import join
+from os.path import dirname, exists, join
+from shlex import split
+from typing import List, Tuple, Union
 
 from inotify_simple import INotify, flags, masks  # type: ignore
+from tomlkit.api import dumps, parse, table
 
 
 class SubprocessError(RuntimeError):
     pass
 
 
-def p(str):
-    print(str, flush=True)
+def p(s: str) -> None:
+    print(s, flush=True)
 
 
-async def run_cmds(*cmds):
+async def run_subprocess(*cmds: Union[str, Tuple[str, str]]) -> None:
     tasks = {
-        create_task(proc.communicate()): (cmd, proc)
-        for cmd, proc in [
-            (cmd, await create_subprocess_exec(*cmd.split(), stdout=PIPE, stderr=PIPE))
-            for cmd in cmds
+        create_task(proc.communicate()): (name, proc)
+        for name, proc in [
+            (name, await create_subprocess_exec(*split(cmd), stdout=PIPE, stderr=PIPE))
+            for name, cmd in [
+                (split(item)[0], item) if isinstance(item, str) else item
+                for item in cmds
+            ]
         ]
     }
     failed = False
@@ -27,7 +34,7 @@ async def run_cmds(*cmds):
         done, pending = await wait(tasks.keys(), return_when=FIRST_COMPLETED)
         for task in done:
             stdout, stderr = task.result()
-            cmd, proc = tasks.pop(task)
+            name, proc = tasks.pop(task)
             if proc.returncode != 0:
                 failed = True
             border = "*" if proc.returncode == 0 else "!"
@@ -42,8 +49,7 @@ async def run_cmds(*cmds):
                 ]
             )
             p(
-                f"{border*3} "
-                + cmd
+                f"{border*3} {name}"
                 + (f"\n{output}\n{border} " if output else " ")
                 + f"=> {proc.returncode}"
             )
@@ -53,70 +59,54 @@ async def run_cmds(*cmds):
         raise SubprocessError()
 
 
-async def check_all(cache_dir):
-    # isort configuration from:
-    #   https://black.readthedocs.io/en/stable/the_black_code_style.html#how-black-wraps-lines  # noqa: B950
-    await run_cmds(
-        "isort "
-        "--multi-line=3 "
-        "--trailing-comma "
-        "--force-grid-wrap=0 "
-        "--use-parentheses "
-        "--line-width=88 "
-        "-rc "
-        "."
-    )
-    await run_cmds("black .")
-    await run_cmds(
-        # Based on:
-        #   https://black.readthedocs.io/en/stable/the_black_code_style.html#line-length  # noqa: B950
-        (
-            "flake8 "
-            "--max-line-length=80 "
-            "--max-complexity=18 "
-            "--select=B,C,E,F,W,B9 "
-            "--ignore=E203,E501,W503,B008 "
-            "."
-        ),
-        (
-            "mypy "
-            "--disallow-any-generics "
-            "--warn-redundant-casts "
-            f"--warn-unused-ignores --cache-dir {join(cache_dir, 'mypy')} ."
-        ),
-        f"pytest -o cache_dir={join(cache_dir, 'pytest')}",
-    )
+async def run_formatters(check_only: bool = False) -> None:
+    await run_subprocess(f"isort {'--check' if check_only else ''} .")
+    await run_subprocess(f"black {'--check' if check_only else ''} .")
 
 
-async def check(cache_dir):
+async def run_checks(cache_dir: str) -> None:
+    PYTEST = f"pytest -o cache_dir={cache_dir}/pytest -vv"
+    await run_subprocess(
+        "flake8 .",
+        f"mypy --cache-dir {cache_dir}/mypy",
+        f"{PYTEST} -m 'not slow'",
+    )
+    await run_subprocess(("pytest [slow]", f"{PYTEST} -x -m slow"))
+
+
+async def run_once(check_only: bool, cache_dir: str) -> bool:
     try:
-        await check_all(cache_dir=cache_dir)
+        await run_formatters(check_only)
+        await run_checks(cache_dir)
     except SubprocessError:
         p("!!! Problems found.")
         return False
-    p("*** All good.")
-    return True
+    else:
+        p("*** All good.")
+        return True
 
 
-async def amain(args):
-    success = await check(cache_dir=args.cache_dir)
-    if not args.watch:
-        exit(0 if success else 1)
-
+async def run_watch(watch_delay: int, cache_dir: str) -> None:
     inotify = INotify()
     watch_flags = (
         masks.MOVE | flags.CREATE | flags.DELETE | flags.MODIFY | flags.DELETE_SELF
     )
     watchers = {}
-    for root, _, _ in walk("."):
+    for root, dirs, _ in walk("."):
+        for d in [".git", "__pycache__"]:
+            if d in dirs:
+                dirs.remove(d)
         wd = inotify.add_watch(root, watch_flags)
         watchers[wd] = root
-    paths = []
+    paths: List[str] = []
+    finalize = False
     while True:
         events = inotify.read(
-            timeout=(args.watch_delay if paths else None), read_delay=None,
+            timeout=(watch_delay if (paths or finalize) else None), read_delay=None
         )
         for event in events:
+            if event.name.endswith(".isorted"):
+                continue
             path = join(watchers[event.wd], event.name)
             if event.mask & flags.ISDIR and event.mask & (
                 flags.CREATE | flags.MOVED_TO
@@ -127,7 +117,60 @@ async def amain(args):
                 del watchers[event.wd]
             else:
                 paths.append(path)
-        if not events and paths:
-            p("\n")
-            await check(cache_dir=args.cache_dir)
-            paths = []
+        if not events:
+            if paths:
+                if not finalize:
+                    p("\n")
+                try:
+                    await run_formatters()
+                except SubprocessError:
+                    p("!!! Problems found.")
+                else:
+                    finalize = True
+                paths.clear()
+            elif finalize:
+                try:
+                    await run_checks(cache_dir)
+                except SubprocessError:
+                    p("!!! Problems found.")
+                else:
+                    p("*** All good.")
+                finalize = False
+
+
+def add_configs() -> None:
+    """Add configurations if they are missing."""
+    data_dir = join(dirname(__file__), "data")
+    base_pyproj = parse(open(join(data_dir, "pyproject.toml")).read())
+    pyproj = parse(open("pyproject.toml").read())
+    base_tools = base_pyproj["tool"]
+    assert isinstance(base_tools, MutableMapping)
+    pyproj_changed = False
+    if "tool" not in pyproj:
+        pyproj["tool"] = table()
+        pyproj_changed = True
+    tools = pyproj["tool"]
+    assert isinstance(tools, MutableMapping)
+    for k, v in base_tools.items():
+        if k not in tools:
+            tools[k] = v
+            pyproj_changed = True
+    if pyproj_changed:
+        open("pyproject.toml", "w").write(dumps(pyproj))
+    if not exists(".flake8"):
+        open(".flake8", "w").write(open(join(data_dir, "flake8")).read())
+
+
+async def amain(
+    *, watch: bool, watch_delay: int, check_only: bool, cache_dir: str
+) -> int:
+    add_configs()
+    if watch:
+        try:
+            await run_once(check_only=False, cache_dir=cache_dir)
+            await run_watch(watch_delay, cache_dir)
+        except KeyboardInterrupt:
+            p("Exiting.")
+        return 0
+    else:
+        return 0 if await run_once(check_only, cache_dir) else 1

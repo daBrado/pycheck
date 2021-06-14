@@ -1,0 +1,28 @@
+[tool.isort]
+profile = "black"
+skip_gitignore = true
+
+[tool.pytest.ini_options]
+testpaths = "tests"
+markers = [
+    "slow: marks tests as slow",
+]
+
+[tool.mypy]
+files = ["."]
+
+# Disallow dynamic typing
+disallow_any_unimported = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+
+# Untyped definitions and calls
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+# Configuration warnings
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# Miscellaneous strictness flags
+no_implicit_reexport = true
