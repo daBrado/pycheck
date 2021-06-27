@@ -4,10 +4,11 @@ from collections.abc import MutableMapping
 from os import walk
 from os.path import dirname, exists, join
 from shlex import split
-from typing import List, Tuple, Union
+from typing import List, NamedTuple, Tuple, Union, cast
 
 from inotify_simple import INotify, flags, masks  # type: ignore
 from tomlkit.api import dumps, parse, table
+from tomlkit.container import Container
 
 
 class SubprocessError(RuntimeError):
@@ -64,20 +65,21 @@ async def run_formatters(check_only: bool = False) -> None:
     await run_subprocess(f"black {'--check' if check_only else ''} .")
 
 
-async def run_checks(cache_dir: str) -> None:
+async def run_checks(has_slow_tests: bool, cache_dir: str) -> None:
     PYTEST = f"pytest -o cache_dir={cache_dir}/pytest -vv"
     await run_subprocess(
         "flake8 .",
         f"mypy --cache-dir {cache_dir}/mypy",
-        f"{PYTEST} -m 'not slow'",
+        PYTEST + (" -m 'not slow'" if has_slow_tests else ""),
     )
-    await run_subprocess(("pytest [slow]", f"{PYTEST} -x -m slow"))
+    if has_slow_tests:
+        await run_subprocess(("pytest [slow]", f"{PYTEST} -x -m slow"))
 
 
-async def run_once(check_only: bool, cache_dir: str) -> bool:
+async def run_once(has_slow_tests: bool, check_only: bool, cache_dir: str) -> bool:
     try:
         await run_formatters(check_only)
-        await run_checks(cache_dir)
+        await run_checks(has_slow_tests=has_slow_tests, cache_dir=cache_dir)
     except SubprocessError:
         p("!!! Problems found.")
         return False
@@ -86,7 +88,7 @@ async def run_once(check_only: bool, cache_dir: str) -> bool:
         return True
 
 
-async def run_watch(watch_delay: int, cache_dir: str) -> None:
+async def run_watch(has_slow_tests: bool, watch_delay: int, cache_dir: str) -> None:
     inotify = INotify()
     watch_flags = (
         masks.MOVE | flags.CREATE | flags.DELETE | flags.MODIFY | flags.DELETE_SELF
@@ -130,7 +132,7 @@ async def run_watch(watch_delay: int, cache_dir: str) -> None:
                 paths.clear()
             elif finalize:
                 try:
-                    await run_checks(cache_dir)
+                    await run_checks(has_slow_tests=has_slow_tests, cache_dir=cache_dir)
                 except SubprocessError:
                     p("!!! Problems found.")
                 else:
@@ -138,7 +140,17 @@ async def run_watch(watch_delay: int, cache_dir: str) -> None:
                 finalize = False
 
 
-def add_configs() -> None:
+class PycheckConfig(NamedTuple):
+    has_slow_tests: bool
+
+
+def _cget(c: Container, *keys: str) -> Container:
+    for k in keys:
+        c = cast(Container, c[k])
+    return c
+
+
+def handle_config() -> PycheckConfig:
     """Add configurations if they are missing."""
     data_dir = join(dirname(__file__), "data")
     base_pyproj = parse(open(join(data_dir, "pyproject.toml")).read())
@@ -159,18 +171,40 @@ def add_configs() -> None:
         open("pyproject.toml", "w").write(dumps(pyproj))
     if not exists(".flake8"):
         open(".flake8", "w").write(open(join(data_dir, "flake8")).read())
+    return PycheckConfig(
+        has_slow_tests=any(
+            m.startswith("slow:")
+            for m in _cget(pyproj, "tool", "pytest", "ini_options", "markers")
+        )
+    )
 
 
 async def amain(
     *, watch: bool, watch_delay: int, check_only: bool, cache_dir: str
 ) -> int:
-    add_configs()
+    config = handle_config()
     if watch:
         try:
-            await run_once(check_only=False, cache_dir=cache_dir)
-            await run_watch(watch_delay, cache_dir)
+            await run_once(
+                has_slow_tests=config.has_slow_tests,
+                check_only=False,
+                cache_dir=cache_dir,
+            )
+            await run_watch(
+                has_slow_tests=config.has_slow_tests,
+                watch_delay=watch_delay,
+                cache_dir=cache_dir,
+            )
         except KeyboardInterrupt:
             p("Exiting.")
         return 0
     else:
-        return 0 if await run_once(check_only, cache_dir) else 1
+        return (
+            0
+            if await run_once(
+                has_slow_tests=config.has_slow_tests,
+                check_only=check_only,
+                cache_dir=cache_dir,
+            )
+            else 1
+        )
